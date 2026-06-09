@@ -1,0 +1,17 @@
+# Entorno virtual (No queremos subir gigabytes de librerías de Python)
+venv/
+.venv/
+env/
+
+# Archivos de configuración secreta (¡EL MÁS IMPORTANTE!)
+.env
+
+# Archivos temporales de Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Archivos del sistema operativo u editores
+.DS_Store
+.vscode/
+.idea/
