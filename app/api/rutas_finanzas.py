@@ -23,5 +23,5 @@ def registrar_transaccion_personal(transaccion: TransaccionCreate):
 # 2. Listar todos los movimientos personales
 @router.get("/", response_model=List[TransaccionResponse])
 def listar_transacciones_personales():
-    respuesta = supabase.table("transacciones_personales").select("*").order("fecha", desc=True).execute()
+    respuesta = supabase.table("transacciones_personales").select("*").order("fecha_transaccion", desc=True).execute()
     return respuesta.data
