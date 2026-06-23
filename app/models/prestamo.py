@@ -14,7 +14,7 @@ class PrestamoResponse(BaseModel):
     id: UUID
     cliente_id: UUID
     monto_inicial: float
-    saldo_actual: float  # Al inicio, es igual al monto inicial
+    saldo_actual: float  
     tasa_interes: float
     estado: str
     fecha_creacion: datetime
