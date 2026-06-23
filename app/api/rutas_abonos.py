@@ -2,53 +2,142 @@ from fastapi import APIRouter, HTTPException
 from app.database.conexion import supabase
 from app.models.abono import AbonoCreate, AbonoResponse
 from uuid import UUID
+from typing import List
 
 router = APIRouter(prefix="/abonos", tags=["Abonos"])
 
+# 1. REGISTRAR ABONO (Divide capital/interés y apaga el préstamo si llega a 0)
 @router.post("/", response_model=AbonoResponse)
 def registrar_abono(abono: AbonoCreate):
-    # 1. Convertimos el ID a string para evitar errores de serialización JSON
     id_prestamo_str = str(abono.prestamo_id)
     
-    # 2. Traer el préstamo actual de Supabase para ver cuánto debe
     res_prestamo = supabase.table("prestamos").select("*").eq("id", id_prestamo_str).execute()
-    
     if not res_prestamo.data:
         raise HTTPException(status_code=404, detail="El préstamo especificado no existe")
         
     prestamo_actual = res_prestamo.data[0]
     
-    # REGLA: No se pueden hacer abonos a préstamos ya pagados
     if prestamo_actual["estado"] == "Pagado":
         raise HTTPException(status_code=400, detail="Este préstamo ya se encuentra completamente Pagado")
         
     saldo_anterior = float(prestamo_actual["saldo_actual"])
-    monto_abono = float(abono.monto)
     
-    # REGLA: No abonar más de lo que se debe
-    if monto_abono > saldo_anterior:
+    if abono.monto_capital > saldo_anterior:
         raise HTTPException(
             status_code=400, 
-            detail=f"El abono (${monto_abono}) supera al saldo pendiente (${saldo_anterior})"
+            detail=f"El abono a capital (${abono.monto_capital}) supera al saldo pendiente (${saldo_anterior})"
         )
         
-    # 3. MATEMÁTICA FINANCIERA: Calcular nuevo saldo y estado
-    nuevo_saldo = saldo_anterior - monto_abono
+    # Matemática: Solo el capital resta la deuda
+    nuevo_saldo = max(0.0, saldo_anterior - abono.monto_capital)
     nuevo_estado = "Pagado" if nuevo_saldo == 0 else "Activo"
+    activo_flag = False if nuevo_saldo == 0 else True
     
-    # 4. ACTUALIZACIÓN: Guardar el nuevo saldo en la tabla 'prestamos'
+    # Actualizar Préstamo
     supabase.table("prestamos").update({
         "saldo_actual": nuevo_saldo,
-        "estado": nuevo_estado
+        "estado": nuevo_estado,
+        "activo": activo_flag
     }).eq("id", id_prestamo_str).execute()
     
-    # 5. REGISTRO: Insertar el recibo del abono en la tabla 'abonos'
-    datos_abono = abono.model_dump()
-    datos_abono["prestamo_id"] = id_prestamo_str # Forzamos string
+    # Guardar Abono Detallado
+    monto_total = abono.monto_capital + abono.monto_interes
+    datos_abono = {
+        "prestamo_id": id_prestamo_str,
+        "monto_total": monto_total,
+        "monto_capital": abono.monto_capital,
+        "monto_interes": abono.monto_interes,
+        "estado": "valido"
+    }
     
     res_abono = supabase.table("abonos").insert(datos_abono).execute()
-    
     if not res_abono.data:
         raise HTTPException(status_code=400, detail="No se pudo procesar el recibo del abono")
         
     return res_abono.data[0]
+
+# 2. ELIMINAR / ANULAR ABONO (Devuelve el dinero a la deuda automáticamente)
+@router.delete("/{abono_id}", response_model=dict)
+def anular_abono(abono_id: UUID):
+    id_abono_str = str(abono_id)
+    
+    res_abono = supabase.table("abonos").select("*").eq("id", id_abono_str).execute()
+    if not res_abono.data:
+        raise HTTPException(status_code=404, detail="El abono no existe")
+        
+    abono_actual = res_abono.data[0]
+    if abono_actual["estado"] == "anulado":
+        raise HTTPException(status_code=400, detail="Este abono ya se encontraba anulado")
+        
+    id_prestamo_str = str(abono_actual["prestamo_id"])
+    capital_a_revertir = float(abono_actual["monto_capital"])
+    
+    # Recuperar el préstamo para sumarle la deuda cancelada por error
+    res_prestamo = supabase.table("prestamos").select("*").eq("id", id_prestamo_str).execute()
+    if not res_prestamo.data:
+        raise HTTPException(status_code=404, detail="El préstamo asociado ya no existe")
+        
+    prestamo_actual = res_prestamo.data[0]
+    nuevo_saldo = float(prestamo_actual["saldo_actual"]) + capital_a_revertir
+    
+    # Regresa el préstamo a estado Activo
+    supabase.table("prestamos").update({
+        "saldo_actual": nuevo_saldo,
+        "estado": "Activo",
+        "activo": True
+    }).eq("id", id_prestamo_str).execute()
+    
+    # Cambiar estado del abono a anulado
+    supabase.table("abonos").update({"estado": "anulado"}).eq("id", id_abono_str).execute()
+    
+    return {"mensaje": "Abono anulado con éxito. La deuda del cliente ha sido restaurada."}
+
+# 3. EDITAR ABONO (Corrige montos mal digitados y recalcula la deuda limpia)
+@router.put("/{abono_id}", response_model=AbonoResponse)
+def editar_abono(abono_id: UUID, nuevo_abono: AbonoCreate):
+    id_abono_str = str(abono_id)
+    
+    res_abono = supabase.table("abonos").select("*").eq("id", id_abono_str).execute()
+    if not res_abono.data:
+        raise HTTPException(status_code=404, detail="El abono no existe")
+        
+    abono_viejo = res_abono.data[0]
+    if abono_viejo["estado"] == "anulado":
+        raise HTTPException(status_code=400, detail="No se puede editar un abono anulado")
+        
+    id_prestamo_str = str(abono_viejo["prestamo_id"])
+    capital_viejo = float(abono_viejo["monto_capital"])
+    
+    res_prestamo = supabase.table("prestamos").select("*").eq("id", id_prestamo_str).execute()
+    if not res_prestamo.data:
+        raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+        
+    prestamo = res_prestamo.data[0]
+    
+    # Reversión virtual del capital viejo para conocer el saldo base real
+    saldo_base = float(prestamo["saldo_actual"]) + capital_viejo
+    
+    if nuevo_abono.monto_capital > saldo_base:
+        raise HTTPException(status_code=400, detail="El nuevo capital ingresado supera el saldo de la deuda")
+        
+    # Nuevo cálculo
+    nuevo_saldo = max(0.0, saldo_base - nuevo_abono.monto_capital)
+    nuevo_estado = "Pagado" if nuevo_saldo == 0 else "Activo"
+    activo_flag = False if nuevo_saldo == 0 else True
+    
+    # Guardar cambios en préstamo
+    supabase.table("prestamos").update({
+        "saldo_actual": nuevo_saldo,
+        "estado": nuevo_estado,
+        "activo": activo_flag
+    }).eq("id", id_prestamo_str).execute()
+    
+    # Modificar el recibo del abono
+    monto_total = nuevo_abono.monto_capital + nuevo_abono.monto_interes
+    res_update = supabase.table("abonos").update({
+        "monto_total": monto_total,
+        "monto_capital": nuevo_abono.monto_capital,
+        "monto_interes": nuevo_abono.monto_interes
+    }).eq("id", id_abono_str).execute()
+    
+    return res_update.data[0]
