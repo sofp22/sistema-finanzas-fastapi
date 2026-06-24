@@ -17,6 +17,7 @@ class ClienteResponse(BaseModel):
     telefono: Optional[str]
     nivel_confianza: int
     fecha_registro: datetime
+    prestamos: List[PrestamoResponse] = []
 
 # une al cliente con todo su historial financiero
 class PerfilClienteResponse(BaseModel):

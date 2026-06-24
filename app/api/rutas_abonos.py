@@ -141,3 +141,11 @@ def editar_abono(abono_id: UUID, nuevo_abono: AbonoCreate):
     }).eq("id", id_abono_str).execute()
     
     return res_update.data[0]
+
+# 4. OBTENER HISTORIAL DE ABONOS DE UN PRÉSTAMO (¡El endpoint que faltaba!)
+@router.get("/prestamo/{prestamo_id}", response_model=List[AbonoResponse])
+def obtener_abonos_por_prestamo(prestamo_id: UUID):
+    # Le pedimos a Supabase todos los abonos asociados a este ID de préstamo
+    respuesta = supabase.table("abonos").select("*").eq("prestamo_id", str(prestamo_id)).execute()
+    
+    return respuesta.data

@@ -11,28 +11,22 @@ router = APIRouter(prefix="/clientes", tags=["Clientes"])
 @router.post("/", response_model=ClienteResponse)
 def crear_cliente(cliente: ClienteCreate):
     datos_cliente = cliente.model_dump()
-    # Usamos "clientes" en minúscula para que Supabase lo entienda
     respuesta = supabase.table("clientes").insert(datos_cliente).execute()
     
     if not respuesta.data:
         raise HTTPException(status_code=400, detail="No se pudo registrar el cliente")
-        
     return respuesta.data[0]
 
 #  Ver todos los clientes
 @router.get("/", response_model=List[ClienteResponse])
 def listar_clientes():
-    # Usamos "clientes" en minúscula
-    respuesta = supabase.table("clientes").select("*").order("nombre").execute()
+    respuesta = supabase.table("clientes").select("*, prestamos(*)").order("nombre").execute()
     return respuesta.data
 
 #  Buscar un cliente específico por su número de cédula
 @router.get("/buscar/{cedula}", response_model=ClienteResponse)
 def obtener_cliente_por_cedula(cedula: str):
-    # Le decimos a Supabase: "Filtra en la tabla clientes donde la columna cedula sea igual (eq) al parámetro"
-    respuesta = supabase.table("clientes").select("*").eq("cedula", cedula).execute()
-    
-    # Si la lista regresa vacía, significa que esa cédula no existe en el sistema
+    respuesta = supabase.table("clientes").select("*, prestamos(*)").eq("cedula", cedula).execute()
     if not respuesta.data:
         raise HTTPException(status_code=404, detail="Cliente no encontrado con esa cédula")
         
@@ -56,18 +50,14 @@ def obtener_perfil_completo_cliente(cedula: str):
     # 3. LÓGICA DE NEGOCIO: Calculamos su estado financiero en tiempo real
     total_deuda = 0.0
     tiene_deudas_activas = False
-    
     for prestamo in lista_prestamos:
-        if prestamo["estado"] == "Activo":
+        if str(prestamo["estado"]).lower() == "activo":
             total_deuda += float(prestamo["saldo_actual"])
             tiene_deudas_activas = True
             
-    # Determinamos su situación de pago (Paz y Salvo o Con Deuda)
     estado_paz_y_salvo = "SÍ" if total_deuda == 0 and len(lista_prestamos) > 0 else "NO"
     if len(lista_prestamos) == 0:
         estado_paz_y_salvo = "Sin préstamos registrados"
-
-    # 4. Armamos el paquete definitivo para el Frontend
     return {
         "cliente": cliente_datos,
         "prestamos": lista_prestamos,
@@ -78,3 +68,24 @@ def obtener_perfil_completo_cliente(cedula: str):
             "puede_solicitar_nuevo_prestamo": not tiene_deudas_activas 
         }
     }
+# ENPOINT PARA EDITAR CLIENTE
+@router.put("/{cliente_id}")
+def editar_cliente(cliente_id: str, datos_actualizados: dict):
+    try:
+        response = supabase.table("clientes").update(datos_actualizados).eq("id", cliente_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Cliente no encontrado")
+        return {"mensaje": "Cliente actualizado correctamente", "data": response.data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ENDPOINT PARA ELIMINAR CLIENTE
+@router.delete("/{cliente_id}")
+def eliminar_cliente(cliente_id: str):
+    try:
+        response = supabase.table("clientes").delete().eq("id", cliente_id).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Cliente no encontrado")
+        return {"mensaje": "Cliente eliminado correctamente"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
