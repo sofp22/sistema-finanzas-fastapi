@@ -6,6 +6,7 @@ from app.api.rutas_prestamos import router as prestamos_router
 from app.api.rutas_abonos import router as abonos_router
 from app.api.rutas_finanzas import router as finanzas_router
 from app.api.rutas_dashboard import router as dashboard_router
+from app.api.rutas_balance import router as balance_router
 
 app = FastAPI(
     title="API Finanzas y Préstamos",
@@ -26,6 +27,7 @@ app.include_router(prestamos_router) # 2. Registramos préstamos
 app.include_router(abonos_router) # 3. Registramos abonos
 app.include_router(finanzas_router)   # 2. Activamos finanzas personales
 app.include_router(dashboard_router)
+app.include_router(balance_router)
 
 @app.get("/")
 def verificar_estado():
