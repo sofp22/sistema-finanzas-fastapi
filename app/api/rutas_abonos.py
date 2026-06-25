@@ -3,19 +3,22 @@ from app.database.conexion import supabase
 from app.models.abono import AbonoCreate, AbonoResponse
 from uuid import UUID
 from typing import List
+from datetime import datetime
 
 router = APIRouter(prefix="/abonos", tags=["Abonos"])
 
-# 1. REGISTRAR ABONO (Divide capital/interés y apaga el préstamo si llega a 0)
+# 1. REGISTRAR ABONO + CONTROL EN CALIENTE DE AHORROS Y OBLIGACIONES
 @router.post("/", response_model=AbonoResponse)
 def registrar_abono(abono: AbonoCreate):
     id_prestamo_str = str(abono.prestamo_id)
     
+    # Validar que el préstamo exista y extraer el cliente_id
     res_prestamo = supabase.table("prestamos").select("*").eq("id", id_prestamo_str).execute()
     if not res_prestamo.data:
         raise HTTPException(status_code=404, detail="El préstamo especificado no existe")
         
     prestamo_actual = res_prestamo.data[0]
+    cliente_id = prestamo_actual["cliente_id"]
     
     if prestamo_actual["estado"] == "Pagado":
         raise HTTPException(status_code=400, detail="Este préstamo ya se encuentra completamente Pagado")
@@ -53,6 +56,76 @@ def registrar_abono(abono: AbonoCreate):
     res_abono = supabase.table("abonos").insert(datos_abono).execute()
     if not res_abono.data:
         raise HTTPException(status_code=400, detail="No se pudo procesar el recibo del abono")
+
+    # =========================================================================
+    # 🪙 LOGICA EN TIEMPO REAL: GESTIÓN DE AHORROS Y OBLIGACIONES MENSUALES
+    # =========================================================================
+    
+    # Asegurar que el cliente tenga una cuenta de ahorros activa en el sistema
+    res_ahorro = supabase.table("ahorros").select("*").eq("cliente_id", cliente_id).execute()
+    if not res_ahorro.data:
+        res_nueva_cuenta = supabase.table("ahorros").insert({"cliente_id": cliente_id, "saldo_ahorro": 0.0}).execute()
+        cuenta_ahorro = res_nueva_cuenta.data[0]
+    else:
+        cuenta_ahorro = res_ahorro.data[0]
+        
+    total_a_ahorrar = 0.0
+    
+    # REGLA 1: El 15% de lo pagado a capital se destina a la bolsa de ahorros
+    if abono.monto_capital > 0:
+        monto_15_capital = abono.monto_capital * 0.15
+        total_a_ahorrar += monto_15_capital
+        supabase.table("movimientos_ahorro").insert({
+            "ahorro_id": cuenta_ahorro["id"],
+            "tipo": "15_Capital",
+            "monto": monto_15_capital
+        }).execute()
+
+    # REGLA 2: El interés cubre obligaciones del mes corriente; el sobrante va a ahorros
+    if abono.monto_interes > 0:
+        interes_disponible = abono.monto_interes
+        mes_actual = datetime.now().month
+        
+        # Obtener tus deudas acumuladas del mes
+        res_obligaciones = supabase.table("obligaciones_mensuales").select("*").execute()
+        obligaciones = res_obligaciones.data if res_obligaciones.data else []
+        
+        for ob in obligaciones:
+            # Si cambió el mes en el calendario, reiniciamos el pago mensual automáticamente
+            if ob["ultimo_mes_pago"] != mes_actual:
+                ob["monto_pagado_mes"] = 0.0
+                supabase.table("obligaciones_mensuales").update({
+                    "monto_pagado_mes": 0.0, 
+                    "ultimo_mes_pago": mes_actual
+                }).eq("id", ob["id"]).execute()
+            
+            falta_por_pagar = max(0.0, float(ob["monto_meta"]) - float(ob["monto_pagado_mes"]))
+            
+            # Si la obligación no está cubierta y poseemos interés para abonar
+            if falta_por_pagar > 0 and interes_disponible > 0:
+                abono_a_obligacion = min(interes_disponible, falta_por_pagar)
+                interes_disponible -= abono_a_obligacion
+                nuevo_pago_acumulado = float(ob["monto_pagado_mes"]) + abono_a_obligacion
+                
+                supabase.table("obligaciones_mensuales").update({
+                    "monto_pagado_mes": nuevo_pago_acumulado
+                }).eq("id", ob["id"]).execute()
+                
+        # Si las deudas mensuales ya quedaron 100% cubiertas, todo sobrante va al ahorro
+        if interes_disponible > 0:
+            total_a_ahorrar += interes_disponible
+            supabase.table("movimientos_ahorro").insert({
+                "ahorro_id": cuenta_ahorro["id"],
+                "tipo": "Excedente_Interes",
+                "monto": interes_disponible
+            }).execute()
+
+    # Consolidar saldo definitivo en la cuenta de ahorros si hubo movimientos
+    if total_a_ahorrar > 0:
+        nuevo_saldo_ahorro = float(cuenta_ahorro["saldo_ahorro"]) + total_a_ahorrar
+        supabase.table("ahorros").update({"saldo_ahorro": nuevo_saldo_ahorro}).eq("id", cuenta_ahorro["id"]).execute()
+    
+    # =========================================================================
         
     return res_abono.data[0]
 
@@ -142,10 +215,8 @@ def editar_abono(abono_id: UUID, nuevo_abono: AbonoCreate):
     
     return res_update.data[0]
 
-# 4. OBTENER HISTORIAL DE ABONOS DE UN PRÉSTAMO (¡El endpoint que faltaba!)
+# 4. OBTENER HISTORIAL DE ABONOS DE UN PRÉSTAMO
 @router.get("/prestamo/{prestamo_id}", response_model=List[AbonoResponse])
 def obtener_abonos_por_prestamo(prestamo_id: UUID):
-    # Le pedimos a Supabase todos los abonos asociados a este ID de préstamo
     respuesta = supabase.table("abonos").select("*").eq("prestamo_id", str(prestamo_id)).execute()
-    
     return respuesta.data
