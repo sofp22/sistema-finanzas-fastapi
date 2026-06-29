@@ -1,13 +1,16 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from app.database.conexion import supabase
 from datetime import datetime
 from pydantic import BaseModel
+from typing import Optional
 
 router = APIRouter(prefix="/balance", tags=["Balance Administrador"])
 
 class ObligacionCreate(BaseModel):
     concepto: str
     monto_meta: float
+    descripcion: Optional[str] = None
+    
     
 @router.get("/resumen")
 def obtener_resumen_panel_privado():
@@ -66,3 +69,49 @@ def crear_obligacion_mensual(obligacion: ObligacionCreate):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+# 2️⃣ ENDPOINT PARA REINICIAR (COMPLETAR) OBLIGACIÓN
+@router.put("/obligaciones/{id}/completar")
+def completar_obligacion(id: str):
+    try:
+        # Actualizamos el monto pagado del mes a 0 en Supabase
+        response = supabase.table("obligaciones").update({"monto_pagado_mes": 0}).eq("id", id).execute()
+        
+        # Si la respuesta no trae datos, es porque el ID no existía
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Obligación no encontrada")
+            
+        return {"message": "Obligación reiniciada para el próximo mes exitosamente"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en Supabase: {str(e)}")
+
+# 3️⃣ ENDPOINT PARA EDITAR VALORES
+@router.put("/obligaciones/{id}")
+def editar_obligacion(id: str, data: ObligacionCreate):
+    try:
+        # Modificamos el concepto y la meta con los datos recibidos de Flutter
+        response = supabase.table("obligaciones").update({
+            "concepto": data.concepto,
+            "monto_meta": data.monto_meta
+        }).eq("id", id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Obligación no encontrada")
+            
+        return {"message": "Obligación actualizada correctamente"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en Supabase: {str(e)}")
+
+# 4️⃣ ENDPOINT PARA ELIMINAR OBLIGACIÓN
+@router.delete("/obligaciones/{id}")
+def eliminar_obligacion(id: str):
+    try:
+        # Borramos la fila de la tabla en Supabase
+        response = supabase.table("obligaciones").delete().eq("id", id).execute()
+        
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Obligación no encontrada o ya eliminada")
+            
+        return {"message": "Obligación eliminada correctamente"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en Supabase: {str(e)}")

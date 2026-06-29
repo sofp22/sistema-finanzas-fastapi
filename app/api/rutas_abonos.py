@@ -7,7 +7,7 @@ from datetime import datetime
 
 router = APIRouter(prefix="/abonos", tags=["Abonos"])
 
-# 1. REGISTRAR ABONO + CONTROL EN CALIENTE DE AHORROS Y OBLIGACIONES
+# 1. REGISTRAR ABONO (CON EFECTO CASCADA PARA LOS INTERESES)
 @router.post("/", response_model=AbonoResponse)
 def registrar_abono(abono: AbonoCreate):
     id_prestamo_str = str(abono.prestamo_id)
@@ -57,11 +57,7 @@ def registrar_abono(abono: AbonoCreate):
     if not res_abono.data:
         raise HTTPException(status_code=400, detail="No se pudo procesar el recibo del abono")
 
-    # =========================================================================
-    # 🪙 LOGICA EN TIEMPO REAL: GESTIÓN DE AHORROS Y OBLIGACIONES MENSUALES
-    # =========================================================================
-    
-    # Asegurar que el cliente tenga una cuenta de ahorros activa en el sistema
+    # Inicializar o recuperar cuenta de ahorros del cliente
     res_ahorro = supabase.table("ahorros").select("*").eq("cliente_id", cliente_id).execute()
     if not res_ahorro.data:
         res_nueva_cuenta = supabase.table("ahorros").insert({"cliente_id": cliente_id, "saldo_ahorro": 0.0}).execute()
@@ -81,37 +77,45 @@ def registrar_abono(abono: AbonoCreate):
             "monto": monto_15_capital
         }).execute()
 
-    # REGLA 2: El interés cubre obligaciones del mes corriente; el sobrante va a ahorros
+    # REGLA 2: DISTRIBUCIÓN EN CASCADA DEL INTERÉS
     if abono.monto_interes > 0:
         interes_disponible = abono.monto_interes
         mes_actual = datetime.now().month
         
-        # Obtener tus deudas acumuladas del mes
+        # Obtener todas las metas/obligaciones mensuales de la base de datos
         res_obligaciones = supabase.table("obligaciones_mensuales").select("*").execute()
         obligaciones = res_obligaciones.data if res_obligaciones.data else []
         
+        # Paso A: Control de ciclo de meses (Resetear si cambió el mes en el calendario)
         for ob in obligaciones:
-            # Si cambió el mes en el calendario, reiniciamos el pago mensual automáticamente
             if ob["ultimo_mes_pago"] != mes_actual:
                 ob["monto_pagado_mes"] = 0.0
                 supabase.table("obligaciones_mensuales").update({
                     "monto_pagado_mes": 0.0, 
                     "ultimo_mes_pago": mes_actual
                 }).eq("id", ob["id"]).execute()
+        
+        # Paso B: Efecto derrame en cascada para obligaciones incompletas
+        for ob in obligaciones:
+            if interes_disponible <= 0:
+                break  # Si nos quedamos sin interés, detenemos la distribución
+                
+            meta = float(ob["monto_meta"])
+            pagado_actual = float(ob["monto_pagado_mes"])
+            falta_por_pagar = max(0.0, meta - pagado_actual)
             
-            falta_por_pagar = max(0.0, float(ob["monto_meta"]) - float(ob["monto_pagado_mes"]))
-            
-            # Si la obligación no está cubierta y poseemos interés para abonar
-            if falta_por_pagar > 0 and interes_disponible > 0:
+            # Si a esta obligación le falta dinero para llegar al 100%, la apoyamos
+            if falta_por_pagar > 0:
                 abono_a_obligacion = min(interes_disponible, falta_por_pagar)
                 interes_disponible -= abono_a_obligacion
-                nuevo_pago_acumulado = float(ob["monto_pagado_mes"]) + abono_a_obligacion
+                nuevo_pago_acumulado = pagado_actual + abono_a_obligacion
                 
+                # Actualizamos el progreso de esta meta específica en Supabase
                 supabase.table("obligaciones_mensuales").update({
                     "monto_pagado_mes": nuevo_pago_acumulado
                 }).eq("id", ob["id"]).execute()
                 
-        # Si las deudas mensuales ya quedaron 100% cubiertas, todo sobrante va al ahorro
+        # Paso C: Si TODAS las obligaciones ya están llenas (100%) y sobró dinero, va a ahorros
         if interes_disponible > 0:
             total_a_ahorrar += interes_disponible
             supabase.table("movimientos_ahorro").insert({
@@ -120,14 +124,13 @@ def registrar_abono(abono: AbonoCreate):
                 "monto": interes_disponible
             }).execute()
 
-    # Consolidar saldo definitivo en la cuenta de ahorros si hubo movimientos
+    # Consolidar saldo definitivo en la cuenta de ahorros si hubo movimientos (Regla 1 o Regla 2)
     if total_a_ahorrar > 0:
         nuevo_saldo_ahorro = float(cuenta_ahorro["saldo_ahorro"]) + total_a_ahorrar
         supabase.table("ahorros").update({"saldo_ahorro": nuevo_saldo_ahorro}).eq("id", cuenta_ahorro["id"]).execute()
     
-    # =========================================================================
-        
     return res_abono.data[0]
+
 
 # 2. ELIMINAR / ANULAR ABONO (Devuelve el dinero a la deuda automáticamente)
 @router.delete("/{abono_id}", response_model=dict)
@@ -164,6 +167,7 @@ def anular_abono(abono_id: UUID):
     supabase.table("abonos").update({"estado": "anulado"}).eq("id", id_abono_str).execute()
     
     return {"mensaje": "Abono anulado con éxito. La deuda del cliente ha sido restaurada."}
+
 
 # 3. EDITAR ABONO (Corrige montos mal digitados y recalcula la deuda limpia)
 @router.put("/{abono_id}", response_model=AbonoResponse)
@@ -214,6 +218,7 @@ def editar_abono(abono_id: UUID, nuevo_abono: AbonoCreate):
     }).eq("id", id_abono_str).execute()
     
     return res_update.data[0]
+
 
 # 4. OBTENER HISTORIAL DE ABONOS DE UN PRÉSTAMO
 @router.get("/prestamo/{prestamo_id}", response_model=List[AbonoResponse])

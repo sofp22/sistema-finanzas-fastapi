@@ -13,9 +13,7 @@ def obtener_resumen_financiero_total():
     capital_en_la_calle = sum(float(p["saldo_actual"]) for p in res_prestamos.data)
     total_recaudado_abonos = sum(float(a["monto_total"]) for a in res_abonos.data)
     
-    # --- 2. SECCIÓN PERSONAL (INGRESOS Y GASTOS PERSONALES) ---
-    # CORRECCIÓN 1: Filtramos directamente en Supabase para traer SOLO los activos
-    # CORRECCIÓN 2: Agregamos 'metodo_pago' al select para poder evaluarlo
+
     res_personales = supabase.table("transacciones_personales").select("tipo, monto, metodo_pago").eq("estado", "activo").execute()
     
     total_ingresos_personales = 0.0
@@ -25,13 +23,11 @@ def obtener_resumen_financiero_total():
         if mov["tipo"] == "ingreso":
             total_ingresos_personales += float(mov["monto"])
         elif mov["tipo"] == "gasto":
-            # CORRECCIÓN 3: Excluimos explícitamente los gastos con Tarjeta de Crédito
             if mov.get("metodo_pago") != "tarjeta_credito":
                 total_gastos_personales += float(mov["monto"])
             
     balance_personal_libre = total_ingresos_personales - total_gastos_personales
 
-    # --- 3. RESPUESTA TOTALMENTE DIVIDIDA PARA EL FRONTEND ---
     return {
         "empresa_prestamos": {
             "total_historico_prestado": total_prestado,
